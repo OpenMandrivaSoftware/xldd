@@ -15,6 +15,13 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#ifndef USE_EXTERNAL_ELF_PARSER
+extern "C" {
+#include <gelf.h>
+#include <fcntl.h>
+#include <unistd.h>
+}
+#endif
 
 std::string locate(std::string const &lib) {
 	std::list<std::string> paths = {
@@ -45,6 +52,33 @@ std::string locate(std::string const &lib) {
 
 std::vector<std::string> deps(std::string const &binary, std::vector<std::string> exclude=std::vector<std::string>(), int indent=0) {
 	std::vector<std::string> ret;
+
+#ifndef USE_EXTERNAL_ELF_PARSER
+	int fd = open(binary.c_str(), O_RDONLY);
+	Elf *elf = elf_begin(fd, ELF_C_READ, 0L);
+	Elf_Scn *scn = nullptr;
+	while((scn=elf_nextscn(elf, scn))) {
+		GElf_Shdr shdr = {};
+		gelf_getshdr(scn, &shdr);
+		if(shdr.sh_type == SHT_DYNAMIC) {
+			Elf_Data *data = NULL;
+			data = elf_getdata(scn, data);
+			size_t sh_entsize = gelf_fsize(elf, ELF_T_DYN, 1, EV_CURRENT);
+			for(size_t i = 0; i<shdr.sh_size/sh_entsize; i++) {
+				GElf_Dyn dyn = {};
+				gelf_getdyn(data, i, &dyn);
+				if(dyn.d_tag == DT_NEEDED) {
+					std::string sl = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
+					bool excluded = std::find(exclude.cbegin(), exclude.cend(), sl) != exclude.cend();
+					if(!excluded)
+						ret.push_back(sl);
+				}
+			}
+		}
+	}
+	elf_end(elf);
+	close(fd);
+#else
 	FILE *f=popen((std::string("LANG=C LC_ALL=C LC_MESSAGES=C LINGUAS=C /usr/bin/llvm-readelf -d ") + binary).c_str(), "r");
 	if(!f)
 		return ret;
@@ -70,6 +104,7 @@ std::vector<std::string> deps(std::string const &binary, std::vector<std::string
 	if(line)
 		free(line);
 	pclose(f);
+#endif
 	for(int i=0; i<ret.size(); i++) {
 		std::string s=ret.at(i);
 		std::vector<std::string> xcl = ret;
@@ -87,6 +122,9 @@ int main(int argc, char **argv) {
 		std::cout << argv[0] << ": missing file arguments" << std::endl;
 		return 1;
 	}
+#ifndef USE_EXTERNAL_ELF_PARSER
+	elf_version(EV_CURRENT);
+#endif
 	for(int i=1; i<argc; i++) {
 		if(argc>=3)
 			std::cout << argv[i] << ":" << std::endl;
