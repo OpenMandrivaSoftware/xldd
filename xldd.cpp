@@ -23,7 +23,7 @@ extern "C" {
 }
 #endif
 
-std::string locate(std::string const &lib) {
+std::string locate(std::string const &lib, std::vector<std::string> const &rpath=std::vector<std::string>(), std::vector<std::string> const &runpath=std::vector<std::string>()) {
 	std::list<std::string> paths = {
 #if __WORDSIZE >= 64
 		"/lib64",
@@ -32,6 +32,8 @@ std::string locate(std::string const &lib) {
 		"/lib",
 		"/usr/lib"
 	};
+	for(auto const &s : runpath)
+		paths.push_front(s);
 	char *llp = getenv("LD_LIBRARY_PATH");
 	if(llp) {
 		char *colon=strrchr(llp, ':');
@@ -42,6 +44,8 @@ std::string locate(std::string const &lib) {
 		}
 		paths.push_front(llp);
 	}
+	for(auto const &s : rpath)
+		paths.push_front(s);
 	for(auto const &s : paths) {
 		std::string p = s + "/" + lib;
 		if(std::filesystem::exists(p))
@@ -50,8 +54,11 @@ std::string locate(std::string const &lib) {
 	return "not found";
 }
 
-std::vector<std::string> deps(std::string const &binary, std::vector<std::string> exclude=std::vector<std::string>(), int indent=0) {
-	std::vector<std::string> ret;
+typedef std::pair<std::string,std::string> library;
+
+std::vector<library> deps(std::string const &binary, std::vector<std::string> exclude=std::vector<std::string>(), int indent=0) {
+	std::vector<library> ret;
+	std::vector<std::string> rpath, runpath;
 
 #ifndef USE_EXTERNAL_ELF_PARSER
 	int fd = open(binary.c_str(), O_RDONLY);
@@ -71,7 +78,13 @@ std::vector<std::string> deps(std::string const &binary, std::vector<std::string
 					std::string sl = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
 					bool excluded = std::find(exclude.cbegin(), exclude.cend(), sl) != exclude.cend();
 					if(!excluded)
-						ret.push_back(sl);
+						ret.push_back(std::make_pair(sl, std::string()));
+				} else if(dyn.d_tag == DT_RPATH || dyn.d_tag == DT_RUNPATH) {
+					std::string rp = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
+					if(dyn.d_tag == DT_RPATH)
+						rpath.push_back(rp);
+					else
+						runpath.push_back(rp);
 				}
 			}
 		}
@@ -98,7 +111,7 @@ std::vector<std::string> deps(std::string const &binary, std::vector<std::string
 		*end=0;
 		bool excluded = std::find(exclude.cbegin(), exclude.cend(), sl) != exclude.cend();
 		if(!excluded) {
-			ret.push_back(sl);
+			ret.push_back(std::make_pair<std::string,std::string>(sl, ""));
 		}
 	}
 	if(line)
@@ -106,11 +119,16 @@ std::vector<std::string> deps(std::string const &binary, std::vector<std::string
 	pclose(f);
 #endif
 	for(int i=0; i<ret.size(); i++) {
-		std::string s=ret.at(i);
-		std::vector<std::string> xcl = ret;
-		for(auto const &s : exclude)
-			xcl.push_back(s);
-		std::vector<std::string> d = deps(locate(s), xcl);
+		ret.at(i).second=locate(ret.at(i).first, rpath, runpath);
+	}
+	for(int i=0; i<ret.size(); i++) {
+		std::string s=ret.at(i).first;
+		std::vector<std::string> xcl;
+		for(auto const &d : ret)
+			xcl.push_back(d.first);
+		for(auto const &x : exclude)
+			xcl.push_back(x);
+		std::vector<library> d = deps(ret.at(i).second, xcl);
 		for(auto const &sub : d)
 			ret.push_back(sub);
 	}
@@ -128,15 +146,15 @@ int main(int argc, char **argv) {
 	for(int i=1; i<argc; i++) {
 		if(argc>=3)
 			std::cout << argv[i] << ":" << std::endl;
-		std::vector<std::string> d = deps(argv[i]);
+		std::vector<library> d = deps(argv[i]);
 		if(d.size()) {
 			std::string dynld;
 			std::cout << "\t" << "linux-vdso.so.1 (0x0)" << std::endl;
 			for(auto const &s : d) {
-				if(s.rfind("ld-linux") == 0)
-					dynld=s;
+				if(s.first.rfind("ld-linux") == 0)
+					dynld=s.first;
 				else
-					std::cout << "\t" << s << " => " << locate(s) << " (0x0)" << std::endl;
+					std::cout << "\t" << s.first << " => " << s.second << " (0x0)" << std::endl;
 			}
 			if(dynld.length())
 				std::cout << "\t" << locate(dynld) << " (0x0)" << std::endl;
